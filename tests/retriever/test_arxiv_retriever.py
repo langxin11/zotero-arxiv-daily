@@ -4,6 +4,8 @@ import time
 from types import SimpleNamespace
 
 import feedparser
+import arxiv
+import pytest
 
 from zotero_arxiv_daily.retriever.arxiv_retriever import ArxivRetriever, _run_with_hard_timeout
 import zotero_arxiv_daily.retriever.arxiv_retriever as arxiv_retriever
@@ -61,6 +63,38 @@ def test_arxiv_retriever(config, mock_feedparser, monkeypatch):
 
     assert len(papers) == len(new_entries)
     assert set(p.title for p in papers) == set(e.title for e in new_entries)
+
+
+@pytest.mark.parametrize("status, expected_calls", [(406, 1), (429, 5)])
+def test_arxiv_retriever_uses_rss_when_api_rejects_batch(
+    config, mock_feedparser, monkeypatch, status, expected_calls
+):
+    calls = []
+
+    class RejectingClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def results(self, search):
+            calls.append(search)
+            raise arxiv.HTTPError("https://export.arxiv.org/api/query", 10, status)
+
+    monkeypatch.setattr(arxiv_retriever.arxiv, "Client", RejectingClient)
+    monkeypatch.setattr(arxiv_retriever, "sleep", lambda _: None)
+
+    results = ArxivRetriever(config)._retrieve_raw_papers()
+    expected_entries = [
+        entry for entry in mock_feedparser.entries
+        if entry.get("arxiv_announce_type", "new") == "new"
+    ]
+    assert len(calls) == expected_calls
+    assert len(results) == len(expected_entries)
+    assert [paper.title for paper in results] == [entry.title for entry in expected_entries]
+    assert results[0].authors[0].name == "Alice Smith"
+    assert results[0].summary.startswith("We propose")
+    assert results[0].entry_id == "https://arxiv.org/abs/2508.14001v1"
+    assert results[0].pdf_url == "https://arxiv.org/pdf/2508.14001v1"
+    assert results[0].source_url() == "https://arxiv.org/src/2508.14001v1"
 
 
 def test_run_with_hard_timeout_returns_value():
